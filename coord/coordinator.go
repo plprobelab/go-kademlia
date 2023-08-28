@@ -40,7 +40,7 @@ func (a *StateMachineAction[E]) String() string {
 
 // FindNodeRequestFunc is a function that creates a request to find the supplied node id
 // TODO: consider this being a first class method of the Endpoint
-type FindNodeRequestFunc[K kad.Key[K], A kad.Address[A]] func(kad.NodeID[K]) (address.ProtocolID, kad.Request[K, A])
+type FindNodeRequestFunc[K kad.Key[K], N kad.NodeID[K], I any] func(kad.NodeID[K]) (address.ProtocolID, kad.Request[K, N, I])
 
 // ActionQueue accepts actions and queues them for later execution
 type ActionQueue interface {
@@ -51,7 +51,7 @@ type ActionQueue interface {
 // It is only one possible configuration of the DHT components, others are possible.
 // Currently this is only queries and bootstrapping but will expand to include other state machines such as
 // routing table refresh, and reproviding.
-type Coordinator[K kad.Key[K], A kad.Address[A]] struct {
+type Coordinator[K kad.Key[K], N kad.NodeID[K], I any] struct {
 	// self is the node id of the system the coordinator is running on
 	self kad.NodeID[K]
 
@@ -68,14 +68,14 @@ type Coordinator[K kad.Key[K], A kad.Address[A]] struct {
 	include StateMachine[routing.IncludeState, routing.IncludeEvent]
 
 	// rt is the routing table used to look up nodes by distance
-	rt kad.RoutingTable[K, kad.NodeID[K]]
+	rt kad.RoutingTable[K, N]
 
 	// ep is the message endpoint used to send requests
-	ep endpoint.Endpoint[K, A]
+	ep endpoint.Endpoint[K, N, I]
 
 	// findNodeFn is a function that creates a find node request that may be understod by the endpoint
 	// TODO: thiis should be a function of the endpoint
-	findNodeFn FindNodeRequestFunc[K, A]
+	findNodeFn FindNodeRequestFunc[K, N, I]
 
 	sched ActionQueue
 
@@ -145,7 +145,7 @@ func DefaultConfig() *Config {
 	}
 }
 
-func NewCoordinator[K kad.Key[K], A kad.Address[A]](self kad.NodeID[K], ep endpoint.Endpoint[K, A], fn FindNodeRequestFunc[K, A], rt kad.RoutingTable[K, kad.NodeID[K]], sched ActionQueue, cfg *Config) (*Coordinator[K, A], error) {
+func NewCoordinator[K kad.Key[K], N kad.NodeID[K], I any](self N, ep endpoint.Endpoint[K, N, I], fn FindNodeRequestFunc[K, N, I], rt kad.RoutingTable[K, N], sched ActionQueue, cfg *Config) (*Coordinator[K, N, I], error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	} else if err := cfg.Validate(); err != nil {
@@ -159,18 +159,18 @@ func NewCoordinator[K kad.Key[K], A kad.Address[A]](self kad.NodeID[K], ep endpo
 	qpCfg.QueryConcurrency = cfg.RequestConcurrency
 	qpCfg.RequestTimeout = cfg.RequestTimeout
 
-	qp, err := query.NewPool[K, A](self, qpCfg)
+	qp, err := query.NewPool[K, N, I](self, qpCfg)
 	if err != nil {
 		return nil, fmt.Errorf("query pool: %w", err)
 	}
 
-	bootstrapCfg := routing.DefaultBootstrapConfig[K, A]()
+	bootstrapCfg := routing.DefaultBootstrapConfig()
 	bootstrapCfg.Clock = cfg.Clock
 	bootstrapCfg.Timeout = cfg.QueryTimeout
 	bootstrapCfg.RequestConcurrency = cfg.RequestConcurrency
 	bootstrapCfg.RequestTimeout = cfg.RequestTimeout
 
-	bootstrap, err := routing.NewBootstrap(self, bootstrapCfg)
+	bootstrap, err := routing.NewBootstrap[K, N, I](self, bootstrapCfg)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: %w", err)
 	}
@@ -184,11 +184,11 @@ func NewCoordinator[K kad.Key[K], A kad.Address[A]](self kad.NodeID[K], ep endpo
 	// includeCfg.Concurrency = cfg.IncludeConcurrency
 	// includeCfg.Timeout = cfg.IncludeTimeout
 
-	include, err := routing.NewInclude[K, A](rt, includeCfg)
+	include, err := routing.NewInclude[K, N, I](rt, includeCfg)
 	if err != nil {
 		return nil, fmt.Errorf("include: %w", err)
 	}
-	return &Coordinator[K, A]{
+	return &Coordinator[K, N, I]{
 		self:           self,
 		cfg:            *cfg,
 		ep:             ep,
@@ -202,11 +202,11 @@ func NewCoordinator[K kad.Key[K], A kad.Address[A]](self kad.NodeID[K], ep endpo
 	}, nil
 }
 
-func (c *Coordinator[K, A]) Events() <-chan KademliaEvent {
+func (c *Coordinator[K, N, I]) Events() <-chan KademliaEvent {
 	return c.outboundEvents
 }
 
-func (c *Coordinator[K, A]) scheduleBootstrapEvent(ctx context.Context, ev routing.BootstrapEvent) {
+func (c *Coordinator[K, N, I]) scheduleBootstrapEvent(ctx context.Context, ev routing.BootstrapEvent) {
 	// TODO: enqueue with higher priority when we have priority queues
 	c.sched.EnqueueAction(ctx, &StateMachineAction[routing.BootstrapEvent]{
 		Event:     ev,
@@ -214,10 +214,10 @@ func (c *Coordinator[K, A]) scheduleBootstrapEvent(ctx context.Context, ev routi
 	})
 }
 
-func (c *Coordinator[K, A]) advanceBootstrap(ctx context.Context, ev routing.BootstrapEvent) {
+func (c *Coordinator[K, N, I]) advanceBootstrap(ctx context.Context, ev routing.BootstrapEvent) {
 	bstate := c.bootstrap.Advance(ctx, ev)
 	switch st := bstate.(type) {
-	case *routing.StateBootstrapMessage[K, A]:
+	case *routing.StateBootstrapMessage[K, N, I]:
 		c.sendBootstrapFindNode(ctx, st.NodeID, st.QueryID, st.Stats)
 
 	case *routing.StateBootstrapWaiting:
@@ -233,24 +233,24 @@ func (c *Coordinator[K, A]) advanceBootstrap(ctx context.Context, ev routing.Boo
 	}
 }
 
-func (c *Coordinator[K, A]) scheduleIncludeEvent(ctx context.Context, ev routing.IncludeEvent) {
+func (c *Coordinator[K, N, I]) scheduleIncludeEvent(ctx context.Context, ev routing.IncludeEvent) {
 	c.sched.EnqueueAction(ctx, &StateMachineAction[routing.IncludeEvent]{
 		Event:     ev,
 		AdvanceFn: c.advanceInclude,
 	})
 }
 
-func (c *Coordinator[K, A]) advanceInclude(ctx context.Context, ev routing.IncludeEvent) {
+func (c *Coordinator[K, N, I]) advanceInclude(ctx context.Context, ev routing.IncludeEvent) {
 	// Attempt to advance the include state machine so candidate nodes
 	// are added to the routing table
 	istate := c.include.Advance(ctx, ev)
 	switch st := istate.(type) {
-	case *routing.StateIncludeFindNodeMessage[K, A]:
+	case *routing.StateIncludeFindNodeMessage[K, N, I]:
 		// include wants to send a find node message to a node
 		c.sendIncludeFindNode(ctx, st.NodeInfo)
-	case *routing.StateIncludeRoutingUpdated[K, A]:
+	case *routing.StateIncludeRoutingUpdated[K, N, I]:
 		// a node has been included in the routing table
-		c.outboundEvents <- &KademliaRoutingUpdatedEvent[K, A]{
+		c.outboundEvents <- &KademliaRoutingUpdatedEvent[K, N, I]{
 			NodeInfo: st.NodeInfo,
 		}
 	case *routing.StateIncludeWaitingAtCapacity:
@@ -266,17 +266,17 @@ func (c *Coordinator[K, A]) advanceInclude(ctx context.Context, ev routing.Inclu
 	}
 }
 
-func (c *Coordinator[K, A]) schedulePoolEvent(ctx context.Context, ev query.PoolEvent) {
+func (c *Coordinator[K, N, I]) schedulePoolEvent(ctx context.Context, ev query.PoolEvent) {
 	c.sched.EnqueueAction(ctx, &StateMachineAction[query.PoolEvent]{
 		Event:     ev,
 		AdvanceFn: c.advancePool,
 	})
 }
 
-func (c *Coordinator[K, A]) advancePool(ctx context.Context, ev query.PoolEvent) {
+func (c *Coordinator[K, N, I]) advancePool(ctx context.Context, ev query.PoolEvent) {
 	state := c.pool.Advance(ctx, ev)
 	switch st := state.(type) {
-	case *query.StatePoolQueryMessage[K, A]:
+	case *query.StatePoolQueryMessage[K, N, I]:
 		c.sendQueryMessage(ctx, st.ProtocolID, st.NodeID, st.Message, st.QueryID, st.Stats)
 	case *query.StatePoolWaitingAtCapacity:
 		// nothing to do except wait for message response or timeout
@@ -296,7 +296,7 @@ func (c *Coordinator[K, A]) advancePool(ctx context.Context, ev query.PoolEvent)
 	}
 }
 
-func (c *Coordinator[K, A]) sendQueryMessage(ctx context.Context, protoID address.ProtocolID, to kad.NodeID[K], msg kad.Request[K, A], queryID query.QueryID, stats query.QueryStats) {
+func (c *Coordinator[K, N, I]) sendQueryMessage(ctx context.Context, protoID address.ProtocolID, to N, msg kad.Request[K, N, I], queryID query.QueryID, stats query.QueryStats) {
 	ctx, span := util.StartSpan(ctx, "Coordinator.sendQueryMessage")
 	defer span.End()
 
@@ -307,14 +307,14 @@ func (c *Coordinator[K, A]) sendQueryMessage(ctx context.Context, protoID addres
 			return
 		}
 
-		c.advancePool(ctx, &query.EventPoolMessageFailure[K]{
+		c.advancePool(ctx, &query.EventPoolMessageFailure[K, N]{
 			NodeID:  to,
 			QueryID: queryID,
 			Error:   err,
 		})
 	}
 
-	onMessageResponse := func(ctx context.Context, resp kad.Response[K, A], err error) {
+	onMessageResponse := func(ctx context.Context, resp kad.Response[K, N, I], err error) {
 		if err != nil {
 			onSendError(ctx, err)
 			return
@@ -329,14 +329,14 @@ func (c *Coordinator[K, A]) sendQueryMessage(ctx context.Context, protoID addres
 		}
 
 		// notify caller so they have chance to stop query
-		c.outboundEvents <- &KademliaOutboundQueryProgressedEvent[K, A]{
+		c.outboundEvents <- &KademliaOutboundQueryProgressedEvent[K, N, I]{
 			NodeID:   to,
 			QueryID:  queryID,
 			Response: resp,
 			Stats:    stats,
 		}
 
-		c.advancePool(ctx, &query.EventPoolMessageResponse[K, A]{
+		c.advancePool(ctx, &query.EventPoolMessageResponse[K, N, I]{
 			NodeID:   to,
 			QueryID:  queryID,
 			Response: resp,
@@ -349,7 +349,7 @@ func (c *Coordinator[K, A]) sendQueryMessage(ctx context.Context, protoID addres
 	}
 }
 
-func (c *Coordinator[K, A]) sendBootstrapFindNode(ctx context.Context, to kad.NodeID[K], queryID query.QueryID, stats query.QueryStats) {
+func (c *Coordinator[K, N, I]) sendBootstrapFindNode(ctx context.Context, to N, queryID query.QueryID, stats query.QueryStats) {
 	ctx, span := util.StartSpan(ctx, "Coordinator.sendBootstrapFindNode")
 	defer span.End()
 
@@ -366,7 +366,7 @@ func (c *Coordinator[K, A]) sendBootstrapFindNode(ctx context.Context, to kad.No
 		})
 	}
 
-	onMessageResponse := func(ctx context.Context, resp kad.Response[K, A], err error) {
+	onMessageResponse := func(ctx context.Context, resp kad.Response[K, N, I], err error) {
 		if err != nil {
 			onSendError(ctx, err)
 			return
@@ -381,14 +381,14 @@ func (c *Coordinator[K, A]) sendBootstrapFindNode(ctx context.Context, to kad.No
 		}
 
 		// notify caller so they have chance to stop query
-		c.outboundEvents <- &KademliaOutboundQueryProgressedEvent[K, A]{
+		c.outboundEvents <- &KademliaOutboundQueryProgressedEvent[K, N, I]{
 			NodeID:   to,
 			QueryID:  queryID,
 			Response: resp,
 			Stats:    stats,
 		}
 
-		c.advanceBootstrap(ctx, &routing.EventBootstrapMessageResponse[K, A]{
+		c.advanceBootstrap(ctx, &routing.EventBootstrapMessageResponse[K, N, I]{
 			NodeID:   to,
 			Response: resp,
 		})
@@ -401,7 +401,7 @@ func (c *Coordinator[K, A]) sendBootstrapFindNode(ctx context.Context, to kad.No
 	}
 }
 
-func (c *Coordinator[K, A]) sendIncludeFindNode(ctx context.Context, to kad.NodeInfo[K, A]) {
+func (c *Coordinator[K, N, I]) sendIncludeFindNode(ctx context.Context, to kad.NodeInfo[K, N, I]) {
 	ctx, span := util.StartSpan(ctx, "Coordinator.sendIncludeFindNode")
 	defer span.End()
 
@@ -412,19 +412,19 @@ func (c *Coordinator[K, A]) sendIncludeFindNode(ctx context.Context, to kad.Node
 			return
 		}
 
-		c.advanceInclude(ctx, &routing.EventIncludeMessageFailure[K, A]{
+		c.advanceInclude(ctx, &routing.EventIncludeMessageFailure[K, N, I]{
 			NodeInfo: to,
 			Error:    err,
 		})
 	}
 
-	onMessageResponse := func(ctx context.Context, resp kad.Response[K, A], err error) {
+	onMessageResponse := func(ctx context.Context, resp kad.Response[K, N, I], err error) {
 		if err != nil {
 			onSendError(ctx, err)
 			return
 		}
 
-		c.advanceInclude(ctx, &routing.EventIncludeMessageResponse[K, A]{
+		c.advanceInclude(ctx, &routing.EventIncludeMessageResponse[K, N, I]{
 			NodeInfo: to,
 			Response: resp,
 		})
@@ -434,18 +434,18 @@ func (c *Coordinator[K, A]) sendIncludeFindNode(ctx context.Context, to kad.Node
 	c.ep.MaybeAddToPeerstore(ctx, to, c.cfg.PeerstoreTTL)
 
 	protoID, msg := c.findNodeFn(c.self)
-	err := c.ep.SendRequestHandleResponse(ctx, protoID, to.ID(), msg, msg.EmptyResponse(), 0, onMessageResponse)
+	err := c.ep.SendRequestHandleResponse(ctx, protoID, to.ID, msg, msg.EmptyResponse(), 0, onMessageResponse)
 	if err != nil {
 		onSendError(ctx, err)
 	}
 }
 
-func (c *Coordinator[K, A]) StartQuery(ctx context.Context, queryID query.QueryID, protocolID address.ProtocolID, msg kad.Request[K, A]) error {
+func (c *Coordinator[K, N, I]) StartQuery(ctx context.Context, queryID query.QueryID, protocolID address.ProtocolID, msg kad.Request[K, N, I]) error {
 	ctx, span := util.StartSpan(ctx, "Coordinator.StartQuery")
 	defer span.End()
 	knownClosestPeers := c.rt.NearestNodes(msg.Target(), 20)
 
-	c.schedulePoolEvent(ctx, &query.EventPoolAddQuery[K, A]{
+	c.schedulePoolEvent(ctx, &query.EventPoolAddQuery[K, N, I]{
 		QueryID:           queryID,
 		Target:            msg.Target(),
 		ProtocolID:        protocolID,
@@ -456,7 +456,7 @@ func (c *Coordinator[K, A]) StartQuery(ctx context.Context, queryID query.QueryI
 	return nil
 }
 
-func (c *Coordinator[K, A]) StopQuery(ctx context.Context, queryID query.QueryID) error {
+func (c *Coordinator[K, N, I]) StopQuery(ctx context.Context, queryID query.QueryID) error {
 	ctx, span := util.StartSpan(ctx, "Coordinator.StopQuery")
 	defer span.End()
 
@@ -469,16 +469,16 @@ func (c *Coordinator[K, A]) StopQuery(ctx context.Context, queryID query.QueryID
 
 // AddNodes suggests new DHT nodes and their associated addresses to be added to the routing table.
 // If the routing table is updated as a result of this operation a KademliaRoutingUpdatedEvent event is emitted.
-func (c *Coordinator[K, A]) AddNodes(ctx context.Context, infos []kad.NodeInfo[K, A]) error {
+func (c *Coordinator[K, N, I]) AddNodes(ctx context.Context, infos []kad.NodeInfo[K, N, I]) error {
 	ctx, span := util.StartSpan(ctx, "Coordinator.AddNodes")
 	defer span.End()
 	for _, info := range infos {
-		if key.Equal(info.ID().Key(), c.self.Key()) {
+		if key.Equal(info.ID.Key(), c.self.Key()) {
 			// skip self
 			continue
 		}
 
-		c.scheduleIncludeEvent(ctx, &routing.EventIncludeAddCandidate[K, A]{
+		c.scheduleIncludeEvent(ctx, &routing.EventIncludeAddCandidate[K, N, I]{
 			NodeInfo: info,
 		})
 	}
@@ -488,10 +488,10 @@ func (c *Coordinator[K, A]) AddNodes(ctx context.Context, infos []kad.NodeInfo[K
 
 // Bootstrap instructs the coordinator to begin bootstrapping the routing table.
 // While bootstrap is in progress, no other queries will make progress.
-func (c *Coordinator[K, A]) Bootstrap(ctx context.Context, seeds []kad.NodeID[K]) error {
+func (c *Coordinator[K, N, I]) Bootstrap(ctx context.Context, seeds []N) error {
 	protoID, msg := c.findNodeFn(c.self)
 
-	c.scheduleBootstrapEvent(ctx, &routing.EventBootstrapStart[K, A]{
+	c.scheduleBootstrapEvent(ctx, &routing.EventBootstrapStart[K, N, I]{
 		ProtocolID:        protoID,
 		Message:           msg,
 		KnownClosestNodes: seeds,
@@ -508,10 +508,10 @@ type KademliaEvent interface {
 
 // KademliaOutboundQueryProgressedEvent is emitted by the coordinator when a query has received a
 // response from a node.
-type KademliaOutboundQueryProgressedEvent[K kad.Key[K], A kad.Address[A]] struct {
+type KademliaOutboundQueryProgressedEvent[K kad.Key[K], N kad.NodeID[K], I any] struct {
 	QueryID  query.QueryID
 	NodeID   kad.NodeID[K]
-	Response kad.Response[K, A]
+	Response kad.Response[K, N, I]
 	Stats    query.QueryStats
 }
 
@@ -523,8 +523,8 @@ type KademliaOutboundQueryFinishedEvent struct {
 }
 
 // KademliaRoutingUpdatedEvent is emitted by the coordinator when a new node has been added to the routing table.
-type KademliaRoutingUpdatedEvent[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A]
+type KademliaRoutingUpdatedEvent[K kad.Key[K], N kad.NodeID[K], I any] struct {
+	NodeInfo kad.NodeInfo[K, N, I]
 }
 
 type KademliaUnroutablePeerEvent[K kad.Key[K]] struct{}
@@ -538,9 +538,9 @@ type KademliaBootstrapFinishedEvent struct {
 }
 
 // kademliaEvent() ensures that only Kademlia events can be assigned to a KademliaEvent.
-func (*KademliaRoutingUpdatedEvent[K, A]) kademliaEvent()          {}
-func (*KademliaOutboundQueryProgressedEvent[K, A]) kademliaEvent() {}
-func (*KademliaUnroutablePeerEvent[K]) kademliaEvent()             {}
-func (*KademliaRoutablePeerEvent[K]) kademliaEvent()               {}
-func (*KademliaOutboundQueryFinishedEvent) kademliaEvent()         {}
-func (*KademliaBootstrapFinishedEvent) kademliaEvent()             {}
+func (*KademliaRoutingUpdatedEvent[K, N, I]) kademliaEvent()          {}
+func (*KademliaOutboundQueryProgressedEvent[K, N, I]) kademliaEvent() {}
+func (*KademliaUnroutablePeerEvent[K]) kademliaEvent()                {}
+func (*KademliaRoutablePeerEvent[K]) kademliaEvent()                  {}
+func (*KademliaOutboundQueryFinishedEvent) kademliaEvent()            {}
+func (*KademliaBootstrapFinishedEvent) kademliaEvent()                {}

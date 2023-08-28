@@ -96,27 +96,11 @@ type NodeID[K Key[K]] interface {
 	String() string
 }
 
-type NodeInfoStruct[K Key[K], A Address[A], N NodeID[K]] struct {
-	ID        N
-	Addresses []A
-}
-
-// NodeInfo is a container type that combines node identification information
-// and network addresses at which the node is reachable.
-type NodeInfo[K Key[K], A Address[A], N NodeID[K]] interface {
-	// ID returns the node identifier.
-	ID() N
-
-	// Addresses returns the network addresses associated with the given node.
-	Addresses() []A
-}
-
-// Address is an interface that any type must implement that can be used
-// to address a node in the DHT network. This can be an IP/Port combination
-// or in the case of libp2p a Multiaddress.
-type Address[T any] interface {
-	// Equal re
-	Equal(T) bool
+// NodeInfo is a container type that combines node identification
+// and arbitrary information for that node.
+type NodeInfo[K Key[K], N NodeID[K], I any] struct {
+	ID   N // ID returns the node identifier.
+	Info I // Info contains arbitrary information associated with that node. E.g., network addresses
 }
 
 // Equal checks the equality of two NodeIDs.
@@ -127,7 +111,7 @@ func Equal[K Key[K]](this, that NodeID[K]) bool {
 
 type Message interface{}
 
-type Request[K Key[K], A Address[A], N NodeID[K], I NodeInfo[K, A, N]] interface {
+type Request[K Key[K], N NodeID[K], I any] interface {
 	Message
 
 	// Target returns the target key and true, or false if no target key has been specfied.
@@ -135,17 +119,17 @@ type Request[K Key[K], A Address[A], N NodeID[K], I NodeInfo[K, A, N]] interface
 
 	// EmptyResponse returns an empty response struct for this request message
 	// TODO: this is a weird patter, let's try to remove this.
-	EmptyResponse() Response[K, A, N, I]
+	EmptyResponse() Response[K, N, I]
 }
 
-type Response[K Key[K], A Address[A], N NodeID[K], I NodeInfo[K, A, N]] interface {
+type Response[K Key[K], N NodeID[K], I any] interface {
 	Message
 
-	CloserNodes() []I
+	CloserNodes() []NodeInfo[K, N, I]
 }
 
-type RoutingProtocol[K Key[K], A Address[A], N NodeID[K]] interface {
-	FindNode(ctx context.Context, to N, target K) (NodeInfo[K, A, N], []N, error)
+type RoutingProtocol[K Key[K], N NodeID[K], I any] interface {
+	FindNode(ctx context.Context, to N, target K) (NodeInfo[K, N, I], []N, error)
 	Ping(ctx context.Context, to N) error
 }
 
