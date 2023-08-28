@@ -13,18 +13,18 @@ import (
 	"github.com/plprobelab/go-kademlia/util"
 )
 
-type check[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A]
+type check[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I
 	Started  time.Time
 }
 
-type Include[K kad.Key[K], A kad.Address[A]] struct {
-	rt kad.RoutingTable[K, kad.NodeID[K]]
+type Include[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	rt kad.RoutingTable[K, N]
 
 	// checks is an index of checks in progress
-	checks map[string]check[K, A]
+	checks map[string]check[K, A, N, I]
 
-	candidates *nodeQueue[K, A]
+	candidates *nodeQueue[K, A, N, I]
 
 	// cfg is a copy of the optional configuration supplied to the Include
 	cfg IncludeConfig
@@ -82,29 +82,29 @@ func DefaultIncludeConfig() *IncludeConfig {
 	}
 }
 
-func NewInclude[K kad.Key[K], A kad.Address[A]](rt kad.RoutingTable[K, kad.NodeID[K]], cfg *IncludeConfig) (*Include[K, A], error) {
+func NewInclude[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]](rt kad.RoutingTable[K, N], cfg *IncludeConfig) (*Include[K, A, N, I], error) {
 	if cfg == nil {
 		cfg = DefaultIncludeConfig()
 	} else if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	return &Include[K, A]{
-		candidates: newNodeQueue[K, A](cfg.QueueCapacity),
+	return &Include[K, A, N, I]{
+		candidates: newNodeQueue[K, A, N, I](cfg.QueueCapacity),
 		cfg:        *cfg,
 		rt:         rt,
-		checks:     make(map[string]check[K, A], cfg.Concurrency),
+		checks:     make(map[string]check[K, A, N, I], cfg.Concurrency),
 	}, nil
 }
 
 // Advance advances the state of the include state machine by attempting to advance its query if running.
-func (b *Include[K, A]) Advance(ctx context.Context, ev IncludeEvent) IncludeState {
+func (b *Include[K, A, N, I]) Advance(ctx context.Context, ev IncludeEvent) IncludeState {
 	ctx, span := util.StartSpan(ctx, "Include.Advance")
 	defer span.End()
 
 	switch tev := ev.(type) {
 
-	case *EventIncludeAddCandidate[K, A]:
+	case *EventIncludeAddCandidate[K, A, N, I]:
 		// Ignore if already running a check
 		_, checking := b.checks[key.HexString(tev.NodeInfo.ID().Key())]
 		if checking {
@@ -122,20 +122,20 @@ func (b *Include[K, A]) Advance(ctx context.Context, ev IncludeEvent) IncludeSta
 		}
 		b.candidates.Enqueue(ctx, tev.NodeInfo)
 
-	case *EventIncludeMessageResponse[K, A]:
+	case *EventIncludeMessageResponse[K, A, N, I]:
 		ch, ok := b.checks[key.HexString(tev.NodeInfo.ID().Key())]
 		if ok {
 			delete(b.checks, key.HexString(tev.NodeInfo.ID().Key()))
 			// require that the node responded with at least one closer node
 			if tev.Response != nil && len(tev.Response.CloserNodes()) > 0 {
 				if b.rt.AddNode(tev.NodeInfo.ID()) {
-					return &StateIncludeRoutingUpdated[K, A]{
+					return &StateIncludeRoutingUpdated[K, A, N, I]{
 						NodeInfo: ch.NodeInfo,
 					}
 				}
 			}
 		}
-	case *EventIncludeMessageFailure[K, A]:
+	case *EventIncludeMessageFailure[K, A, N, I]:
 		delete(b.checks, key.HexString(tev.NodeInfo.ID().Key()))
 
 	case *EventIncludePoll:
@@ -160,35 +160,35 @@ func (b *Include[K, A]) Advance(ctx context.Context, ev IncludeEvent) IncludeSta
 		return &StateIncludeIdle{}
 	}
 
-	b.checks[key.HexString(candidate.ID().Key())] = check[K, A]{
+	b.checks[key.HexString(candidate.ID().Key())] = check[K, A, N, I]{
 		NodeInfo: candidate,
 		Started:  b.cfg.Clock.Now(),
 	}
 
 	// Ask the node to find itself
-	return &StateIncludeFindNodeMessage[K, A]{
+	return &StateIncludeFindNodeMessage[K, A, N, I]{
 		NodeInfo: candidate,
 	}
 }
 
 // nodeQueue is a bounded queue of unique NodeIDs
-type nodeQueue[K kad.Key[K], A kad.Address[A]] struct {
+type nodeQueue[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
 	capacity int
-	nodes    []kad.NodeInfo[K, A]
+	nodes    []I
 	keys     map[string]struct{}
 }
 
-func newNodeQueue[K kad.Key[K], A kad.Address[A]](capacity int) *nodeQueue[K, A] {
-	return &nodeQueue[K, A]{
+func newNodeQueue[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]](capacity int) *nodeQueue[K, A, N, I] {
+	return &nodeQueue[K, A, N, I]{
 		capacity: capacity,
-		nodes:    make([]kad.NodeInfo[K, A], 0, capacity),
+		nodes:    make([]I, 0, capacity),
 		keys:     make(map[string]struct{}, capacity),
 	}
 }
 
 // Enqueue adds a node to the queue. It returns true if the node was
 // added and false otherwise.
-func (q *nodeQueue[K, A]) Enqueue(ctx context.Context, n kad.NodeInfo[K, A]) bool {
+func (q *nodeQueue[K, A, N, I]) Enqueue(ctx context.Context, n I) bool {
 	if len(q.nodes) == q.capacity {
 		return false
 	}
@@ -204,20 +204,20 @@ func (q *nodeQueue[K, A]) Enqueue(ctx context.Context, n kad.NodeInfo[K, A]) boo
 
 // Dequeue reads an node from the queue. It returns the node and a true value
 // if a node was read or nil and false if no node was read.
-func (q *nodeQueue[K, A]) Dequeue(ctx context.Context) (kad.NodeInfo[K, A], bool) {
+func (q *nodeQueue[K, A, N, I]) Dequeue(ctx context.Context) (I, bool) {
 	if len(q.nodes) == 0 {
-		var v kad.NodeInfo[K, A]
+		var v I
 		return v, false
 	}
 
-	var n kad.NodeInfo[K, A]
+	var n I
 	n, q.nodes = q.nodes[0], q.nodes[1:]
 	delete(q.keys, key.HexString(n.ID().Key()))
 
 	return n, true
 }
 
-func (q *nodeQueue[K, A]) HasCapacity() bool {
+func (q *nodeQueue[K, A, N, I]) HasCapacity() bool {
 	return len(q.nodes) < q.capacity
 }
 
@@ -228,8 +228,8 @@ type IncludeState interface {
 
 // StateIncludeFindNodeMessage indicates that the include subsystem is waiting to send a find node message a node.
 // A find node message should be sent to the node, with the target being the node's key.
-type StateIncludeFindNodeMessage[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A] // the node to send the mssage to
+type StateIncludeFindNodeMessage[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I // the node to send the mssage to
 }
 
 // StateIncludeIdle indicates that the include is not running its query.
@@ -248,17 +248,17 @@ type StateIncludeWaitingWithCapacity struct{}
 type StateIncludeWaitingFull struct{}
 
 // StateIncludeRoutingUpdated indicates the routing table has been updated with a new node.
-type StateIncludeRoutingUpdated[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A]
+type StateIncludeRoutingUpdated[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I
 }
 
 // includeState() ensures that only Include states can be assigned to an IncludeState.
-func (*StateIncludeFindNodeMessage[K, A]) includeState() {}
-func (*StateIncludeIdle) includeState()                  {}
-func (*StateIncludeWaitingAtCapacity) includeState()     {}
-func (*StateIncludeWaitingWithCapacity) includeState()   {}
-func (*StateIncludeWaitingFull) includeState()           {}
-func (*StateIncludeRoutingUpdated[K, A]) includeState()  {}
+func (*StateIncludeFindNodeMessage[K, A, N, I]) includeState() {}
+func (*StateIncludeIdle) includeState()                        {}
+func (*StateIncludeWaitingAtCapacity) includeState()           {}
+func (*StateIncludeWaitingWithCapacity) includeState()         {}
+func (*StateIncludeWaitingFull) includeState()                 {}
+func (*StateIncludeRoutingUpdated[K, A, N, I]) includeState()  {}
 
 // IncludeEvent is an event intended to advance the state of a include.
 type IncludeEvent interface {
@@ -269,24 +269,24 @@ type IncludeEvent interface {
 type EventIncludePoll struct{}
 
 // EventIncludeAddCandidate notifies that a node should be added to the candidate list
-type EventIncludeAddCandidate[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A] // the candidate node
+type EventIncludeAddCandidate[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I // the candidate node
 }
 
 // EventIncludeMessageResponse notifies a include that a sent message has received a successful response.
-type EventIncludeMessageResponse[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A] // the node the message was sent to
-	Response kad.Response[K, A] // the message response sent by the node
+type EventIncludeMessageResponse[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I                        // the node the message was sent to
+	Response kad.Response[K, A, N, I] // the message response sent by the node
 }
 
 // EventIncludeMessageFailure notifiesa include that an attempt to send a message has failed.
-type EventIncludeMessageFailure[K kad.Key[K], A kad.Address[A]] struct {
-	NodeInfo kad.NodeInfo[K, A] // the node the message was sent to
-	Error    error              // the error that caused the failure, if any
+type EventIncludeMessageFailure[K kad.Key[K], A kad.Address[A], N kad.NodeID[K], I kad.NodeInfo[K, A, N]] struct {
+	NodeInfo I     // the node the message was sent to
+	Error    error // the error that caused the failure, if any
 }
 
 // includeEvent() ensures that only Include events can be assigned to the IncludeEvent interface.
-func (*EventIncludePoll) includeEvent()                  {}
-func (*EventIncludeAddCandidate[K, A]) includeEvent()    {}
-func (*EventIncludeMessageResponse[K, A]) includeEvent() {}
-func (*EventIncludeMessageFailure[K, A]) includeEvent()  {}
+func (*EventIncludePoll) includeEvent()                        {}
+func (*EventIncludeAddCandidate[K, A, N, I]) includeEvent()    {}
+func (*EventIncludeMessageResponse[K, A, N, I]) includeEvent() {}
+func (*EventIncludeMessageFailure[K, A, N, I]) includeEvent()  {}

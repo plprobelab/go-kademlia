@@ -96,11 +96,16 @@ type NodeID[K Key[K]] interface {
 	String() string
 }
 
+type NodeInfoStruct[K Key[K], A Address[A], N NodeID[K]] struct {
+	ID        N
+	Addresses []A
+}
+
 // NodeInfo is a container type that combines node identification information
 // and network addresses at which the node is reachable.
-type NodeInfo[K Key[K], A Address[A]] interface {
+type NodeInfo[K Key[K], A Address[A], N NodeID[K]] interface {
 	// ID returns the node identifier.
-	ID() NodeID[K]
+	ID() N
 
 	// Addresses returns the network addresses associated with the given node.
 	Addresses() []A
@@ -122,7 +127,7 @@ func Equal[K Key[K]](this, that NodeID[K]) bool {
 
 type Message interface{}
 
-type Request[K Key[K], A Address[A]] interface {
+type Request[K Key[K], A Address[A], N NodeID[K], I NodeInfo[K, A, N]] interface {
 	Message
 
 	// Target returns the target key and true, or false if no target key has been specfied.
@@ -130,17 +135,17 @@ type Request[K Key[K], A Address[A]] interface {
 
 	// EmptyResponse returns an empty response struct for this request message
 	// TODO: this is a weird patter, let's try to remove this.
-	EmptyResponse() Response[K, A]
+	EmptyResponse() Response[K, A, N, I]
 }
 
-type Response[K Key[K], A Address[A]] interface {
+type Response[K Key[K], A Address[A], N NodeID[K], I NodeInfo[K, A, N]] interface {
 	Message
 
-	CloserNodes() []NodeInfo[K, A]
+	CloserNodes() []I
 }
 
-type RoutingProtocol[K Key[K], N NodeID[K], A Address[A]] interface {
-	FindNode(ctx context.Context, to N, target K) (NodeInfo[K, A], []N, error)
+type RoutingProtocol[K Key[K], A Address[A], N NodeID[K]] interface {
+	FindNode(ctx context.Context, to N, target K) (NodeInfo[K, A, N], []N, error)
 	Ping(ctx context.Context, to N) error
 }
 
